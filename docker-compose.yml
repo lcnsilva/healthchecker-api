@@ -1,0 +1,278 @@
+# Defines all containers that make up the local HealthChecker backend stack.
+services:
+  # Traefik container responsible for receiving local HTTP traffic and routing it to web services.
+  traefik:
+    # Pulls the official Traefik v3 image.
+    image: traefik:v3
+    # Gives the reverse proxy container a stable name.
+    container_name: healthchecker_traefik
+    # Restarts Traefik unless manually stopped.
+    restart: unless-stopped
+    # Configures Traefik through static CLI flags for local Docker discovery.
+    command:
+      # Enables Docker service discovery through container labels.
+      - --providers.docker=true
+      # Requires services to opt in with traefik.enable=true.
+      - --providers.docker.exposedbydefault=false
+      # Defines the public HTTP entrypoint on container port 80.
+      - --entrypoints.web.address=:80
+      # Enables the local Traefik dashboard API.
+      - --api.dashboard=true
+      # Exposes the dashboard without auth for local development only.
+      - --api.insecure=true
+    # Publishes Traefik entrypoints on the host.
+    ports:
+      # Lets the API be accessed locally through Traefik at http://healthchecker.localhost.
+      - "80:80"
+      # Lets the Traefik dashboard be accessed locally at http://localhost:8080.
+      - "8080:8080"
+    # Allows Traefik to inspect Docker containers and labels.
+    volumes:
+      # Mounts the Docker socket read-only for provider discovery.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Connects Traefik to the internal project network.
+    networks:
+      # Allows Traefik to reach the Nginx web service by container network.
+      - healthchecker_net
+
+  # Laravel PHP-FPM container responsible for executing the HTTP application code.
+  app:
+    # Builds this service from a local Dockerfile instead of pulling a ready image.
+    build:
+      # Sends the docker package directory as the Docker build context.
+      context: .
+      # Points Docker to the PHP-FPM Dockerfile used by Laravel processes.
+      dockerfile: docker/php/Dockerfile
+    # Gives the container a stable, human-readable name.
+    container_name: healthchecker_app
+    # Restarts the container after crashes or Docker restarts, unless manually stopped.
+    restart: unless-stopped
+    # Sets the directory where commands run inside the container.
+    working_dir: /var/www/html
+    # Runs database migrations before starting PHP-FPM.
+    command: ["sh", "docker/php/entrypoint.app.sh"]
+    # Mounts local source code into the container for live development.
+    volumes:
+      # Maps the repository root to Laravel's working directory inside the container.
+      - ./:/var/www/html
+    # Delays app startup until required backing services are healthy.
+    depends_on:
+      # Requires PostgreSQL before the Laravel app starts.
+      db:
+        # Waits for the db healthcheck to pass.
+        condition: service_healthy
+      # Requires Redis before the Laravel app starts.
+      redis:
+        # Waits for the redis healthcheck to pass.
+        condition: service_healthy
+    # Lets dependent services wait until Laravel migrations are available.
+    healthcheck:
+      # Checks whether Laravel can see the migrations table and database state.
+      test: ["CMD-SHELL", "php artisan migrate:status >/dev/null 2>&1"]
+      # Runs the readiness check every 10 seconds.
+      interval: 10s
+      # Gives Artisan enough time to boot Laravel on Windows bind mounts.
+      timeout: 15s
+      # Gives migrations and first boot enough time to finish.
+      retries: 12
+    # Connects the app to the internal project network.
+    networks:
+      # Allows app to reach db, redis, worker, scheduler, and web by service name.
+      - healthchecker_net
+
+  # Queue worker container responsible for asynchronous jobs.
+  worker:
+    # Uses the same PHP image as the app service.
+    build:
+      # Sends the docker package directory as the Docker build context.
+      context: .
+      # Reuses the PHP-FPM Dockerfile because worker needs the same PHP extensions.
+      dockerfile: docker/php/Dockerfile
+    # Gives the worker container a stable name.
+    container_name: healthchecker_worker
+    # Keeps the worker alive across crashes and Docker restarts.
+    restart: unless-stopped
+    # Runs worker commands from the Laravel application root.
+    working_dir: /var/www/html
+    # Overrides the default php-fpm command and starts Laravel's queue worker.
+    command: ["sh", "docker/php/entrypoint.worker.sh"]
+    # Mounts the local code into the worker container.
+    volumes:
+      # Keeps worker code in sync with the host checkout during development.
+      - ./:/var/www/html
+    # Starts worker only after the app process exists and dependencies are healthy.
+    depends_on:
+      # Ensures the Laravel app container has started.
+      app:
+        # Waits until app has run migrations and can query the database.
+        condition: service_healthy
+      # Requires PostgreSQL for jobs that read/write database records.
+      db:
+        # Waits for PostgreSQL to be ready.
+        condition: service_healthy
+      # Requires Redis because the queue backend lives there.
+      redis:
+        # Waits for Redis to be ready.
+        condition: service_healthy
+    # Connects worker to the same private network.
+    networks:
+      # Allows worker to resolve db and redis by service name.
+      - healthchecker_net
+
+  # Scheduler container responsible for Laravel scheduled tasks.
+  scheduler:
+    # Uses the same PHP image as app and worker.
+    build:
+      # Sends the docker package directory as the Docker build context.
+      context: .
+      # Reuses the PHP Dockerfile because scheduler runs artisan commands.
+      dockerfile: docker/php/Dockerfile
+    # Gives the scheduler container a stable name.
+    container_name: healthchecker_scheduler
+    # Restarts scheduled task runner unless manually stopped.
+    restart: unless-stopped
+    # Runs scheduler commands from the Laravel application root.
+    working_dir: /var/www/html
+    # Overrides php-fpm and starts Laravel's scheduler loop.
+    command: ["sh", "docker/php/entrypoint.scheduler.sh"]
+    # Mounts the local code into the scheduler container.
+    volumes:
+      # Keeps scheduler code in sync with the host checkout.
+      - ./:/var/www/html
+    # Starts scheduler only after app, db, and redis are available.
+    depends_on:
+      # Ensures app container has started.
+      app:
+        # Waits until app has run migrations and can query the database.
+        condition: service_healthy
+      # Requires PostgreSQL for scheduled commands that access database state.
+      db:
+        # Waits for PostgreSQL healthcheck.
+        condition: service_healthy
+      # Requires Redis for scheduled dispatching of queued jobs.
+      redis:
+        # Waits for Redis healthcheck.
+        condition: service_healthy
+    # Connects scheduler to the internal project network.
+    networks:
+      # Allows scheduler to reach db and redis by service name.
+      - healthchecker_net
+
+  # Nginx container responsible for receiving browser/API HTTP traffic.
+  web:
+    # Pulls a small official Nginx image.
+    image: nginx:1.27-alpine
+    # Gives the web container a stable name.
+    container_name: healthchecker_web
+    # Restarts Nginx unless manually stopped.
+    restart: unless-stopped
+    # Mounts Laravel public files and Nginx configuration.
+    volumes:
+      # Mounts source read-only because Nginx only needs to serve/read files.
+      - ./:/var/www/html:ro
+      # Mounts custom Nginx virtual host configuration read-only.
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    # Starts Nginx after the app container exists.
+    depends_on:
+      # Nginx forwards PHP requests to the app service.
+      app:
+        # Waits until app has run migrations and can query the database.
+        condition: service_healthy
+    # Advertises the Nginx service to Traefik.
+    labels:
+      # Opts this service into Traefik routing.
+      - traefik.enable=true
+      # Routes local requests for healthchecker.localhost, localhost, or 127.0.0.1 to this service.
+      - traefik.http.routers.healthchecker.rule=Host(`healthchecker.localhost`) || Host(`localhost`) || Host(`127.0.0.1`)
+      # Binds this route to Traefik's HTTP entrypoint.
+      - traefik.http.routers.healthchecker.entrypoints=web
+      # Tells Traefik which internal Nginx port receives HTTP traffic.
+      - traefik.http.services.healthchecker.loadbalancer.server.port=80
+    # Connects web to the internal project network.
+    networks:
+      # Allows Nginx to reach the app service at app:9000.
+      - healthchecker_net
+
+  # PostgreSQL database container.
+  db:
+    # Pulls PostgreSQL 15 on Alpine Linux.
+    image: postgres:15-alpine
+    # Gives the database container a stable name.
+    container_name: healthchecker_db
+    # Restarts the database unless manually stopped.
+    restart: unless-stopped
+    # Defines database credentials and database name.
+    environment:
+      # Uses DB_DATABASE from .env when available, otherwise healthchecker.
+      POSTGRES_DB: ${DB_DATABASE:-healthchecker}
+      # Uses DB_USERNAME from .env when available, otherwise devuser.
+      POSTGRES_USER: ${DB_USERNAME:-devuser}
+      # Uses DB_PASSWORD from .env when available, otherwise devpassword.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-devpassword}
+    # Exposes PostgreSQL on the host for local tools like TablePlus/DBeaver.
+    ports:
+      # Maps host port 5432 to container port 5432.
+      - "5432:5432"
+    # Persists database files outside the container lifecycle.
+    volumes:
+      # Stores PostgreSQL data in a named Docker volume.
+      - pgdata:/var/lib/postgresql/data
+    # Lets Compose know when PostgreSQL is actually ready for connections.
+    healthcheck:
+      # Runs pg_isready using the same database/user configured above.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      # Runs the readiness check every 10 seconds.
+      interval: 10s
+      # Fails an individual check if it takes more than 5 seconds.
+      timeout: 5s
+      # Marks the service unhealthy after 5 failed attempts.
+      retries: 5
+    # Connects PostgreSQL to the internal project network.
+    networks:
+      # Lets Laravel reach the database at host db.
+      - healthchecker_net
+
+  # Redis container used for queue and cache infrastructure.
+  redis:
+    # Pulls Redis 7 on Alpine Linux.
+    image: redis:7-alpine
+    # Gives the Redis container a stable name.
+    container_name: healthchecker_redis
+    # Restarts Redis unless manually stopped.
+    restart: unless-stopped
+    # Exposes Redis on the host for local inspection tools.
+    ports:
+      # Maps host port 6379 to container port 6379.
+      - "6379:6379"
+    # Persists Redis data outside the container lifecycle.
+    volumes:
+      # Stores Redis data in a named Docker volume.
+      - redisdata:/data
+    # Lets Compose know when Redis is ready.
+    healthcheck:
+      # Runs redis-cli ping and expects PONG.
+      test: ["CMD", "redis-cli", "ping"]
+      # Runs the readiness check every 10 seconds.
+      interval: 10s
+      # Fails an individual check if it takes more than 5 seconds.
+      timeout: 5s
+      # Marks the service unhealthy after 5 failed attempts.
+      retries: 5
+    # Connects Redis to the internal project network.
+    networks:
+      # Lets Laravel reach Redis at host redis.
+      - healthchecker_net
+
+# Defines Docker networks used by the services above.
+networks:
+  # Private bridge network for all HealthChecker containers.
+  healthchecker_net:
+    # Uses Docker's standard bridge network driver.
+    driver: bridge
+
+# Defines named volumes used for persistent service data.
+volumes:
+  # Persists PostgreSQL database files.
+  pgdata:
+  # Persists Redis data files.
+  redisdata:
