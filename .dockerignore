@@ -1,0 +1,22 @@
+# Excludes Git history from the Docker build context.
+.git
+# Excludes GitHub workflow metadata from the Docker build context.
+.github
+# Excludes frontend dependencies if they exist locally.
+node_modules
+# Excludes Composer dependencies because they should be installed in the image/container.
+vendor
+# Excludes local Laravel log files from the Docker build context.
+storage/logs/*
+# Excludes Laravel cache artifacts from the Docker build context.
+storage/framework/cache/*
+# Excludes Laravel session artifacts from the Docker build context.
+storage/framework/sessions/*
+# Excludes compiled Blade view artifacts from the Docker build context.
+storage/framework/views/*
+# Excludes local environment secrets from the Docker build context.
+.env
+# Excludes all environment variants such as .env.local or .env.testing.
+.env.*
+# Allows the example environment file to remain available for documentation/setup.
+!.env.example
