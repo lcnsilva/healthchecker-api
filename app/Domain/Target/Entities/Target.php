@@ -1,5 +1,7 @@
 <?php
 
+namespace App\Domain\Target\Entities;
+
 use App\Domain\Shared\UserId;
 use App\Domain\Target\ValueObjects\TargetId;
 use App\Domain\Target\ValueObjects\TargetName;
@@ -15,23 +17,23 @@ final class Target {
         public bool $isPaused = false
     ){}
 
-    public static function create(UserId $userId, TargetName $targetName, TargetUrl $targetUrl): self
+    public static function create(UserId $userId, TargetName $name, TargetUrl $url): self
     {
         return new self(
             id: null,
             userId: $userId,
-            name: $targetName,
-            url: $targetUrl,
+            name: $name,
+            url: $url,
             isPaused: false
         );
     }
 
-    public function rename(TargetName $targetName): void {
-        $this->name = $targetName;
+    public function rename(TargetName $name): void {
+        $this->name = $name;
     }
 
-    public function changeUrl(TargetUrl $targetUrl): void {
-        $this->url = $targetUrl;
+    public function changeUrl(TargetUrl $url): void {
+        $this->url = $url;
     }
 
     public function pause(): void {
