@@ -6,7 +6,7 @@ use App\Application\Commands\UpdateTargetCommand;
 use App\Application\Contracts\Shared\TransactionManager;
 use App\Application\Contracts\Targets\TargetRepository;
 use App\Application\DTO\Targets\TargetData;
-use App\Application\Exceptions\TargetNotFound;
+use App\Application\Exceptions\Targets\TargetNotFound;
 use App\Domain\Shared\UserId;
 use App\Domain\Target\ValueObjects\TargetId;
 use App\Domain\Target\ValueObjects\TargetName;
@@ -30,7 +30,7 @@ final readonly class UpdateTargetUseCase
             if ($target === null) {
                 throw TargetNotFound::forUser();
             }
-            
+
             $target->rename(new TargetName($command->name));
             $target->changeUrl(new TargetUrl($command->url));
             $command->isPaused ? $target->pause() : $target->resume();
