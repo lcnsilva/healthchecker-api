@@ -3,7 +3,7 @@
 namespace App\Application\UseCases\Targets;
 
 use App\Application\Contracts\Targets\TargetRepository;
-use App\Application\Exceptions\TargetNotFound;
+use App\Application\Exceptions\Targets\TargetNotFound;
 use App\Application\Queries\Targets\GetTargetQuery;
 use App\Domain\Shared\UserId;
 use App\Domain\Target\ValueObjects\TargetId;
